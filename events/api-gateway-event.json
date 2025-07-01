@@ -1,0 +1,18 @@
+{
+  "version": "2.0",
+  "routeKey": "GET /demo/external-demo",
+  "rawPath": "/demo/external-demo",
+  "rawQueryString": "",
+  "headers": {
+    "host": "localhost",
+    "x-forwarded-proto": "http"
+  },
+  "requestContext": {
+    "http": {
+      "method": "GET",
+      "path": "/demo/external-demo",
+      "sourceIp": "127.0.0.1"
+    }
+  },
+  "isBase64Encoded": false
+}

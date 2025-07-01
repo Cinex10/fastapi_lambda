@@ -1,0 +1,7 @@
+{
+    "FastApiFunction": {
+      "ENVIRONMENT": "local",
+      "LOG_LEVEL": "DEBUG",
+      "PYTHONPATH": "/opt/python"
+    }
+  }
