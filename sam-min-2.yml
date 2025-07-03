@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: FastAPI application with Mangum handler
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: python3.13
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  LoggingLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: Log level for the application
+
+  # JWT Authorizer Parameters
+  JwtSecret:
+    Type: String
+    Description: JWT Secret
+  
+  JwtAlgorithm:
+    Type: String
+    Description: JWT Algorithm
+    Default: "HS256"
+
+Resources:
+  # IAM Role for API Gateway CloudWatch logging
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Environment}-apigateway-cloudwatch-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  # API Gateway Account Configuration for CloudWatch logging
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  # Layer depuis votre fichier ZIP
+  PythonDependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${Environment}-python-deps"
+      Description: Python dependencies including FastAPI and Mangum
+      ContentUri: layers/python-deps-layer.zip
+      CompatibleRuntimes:
+        - python3.13
+      RetentionPolicy: Retain
+
+  # Fonction FastAPI
+  FastApiFunctionIac:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: main.handler
+      Runtime: python3.13
+      Layers:
+        - !Ref PythonDependenciesLayer
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          LOG_LEVEL: !Ref LoggingLevel
+          JWT_SECRET: "a-string-secret-at-least-256-bits-long"
+          JWT_ALGORITHM: "HS256"
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/poshub-lambda-role'
+  
+
+
+  # Lambda Authorizer Function for JWT validation
+  JwtAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: authorizer.lambda_handler
+      Runtime: python3.13
+      Timeout: 30
+      Layers:
+        - !Ref PythonDependenciesLayer
+      Environment:
+        Variables:
+          JWT_SECRET: !Ref JwtSecret
+          JWT_ALGORITHM: !Ref JwtAlgorithm
+          LOG_LEVEL: !Ref LoggingLevel
+
+  # JWT Authorizer
+  JwtAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: !Sub "${Environment}-jwt-authorizer"
+      Type: TOKEN
+      RestApiId: !Ref OrdersRestApi
+      IdentitySource: method.request.header.Authorization
+      AuthorizerUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${JwtAuthorizerFunction.Arn}/invocations'
+      AuthorizerResultTtlInSeconds: 300
+
+  # Permission for API Gateway to invoke the authorizer function
+  JwtAuthorizerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref JwtAuthorizerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OrdersRestApi}/authorizers/${JwtAuthorizer}'
+
+  # API Gateway RestApi (WEBSERVICE type)
+  OrdersRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${Environment}-fastapi-gateway"
+      Description: !Sub "FastAPI Gateway for ${Environment} environment"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Policy:
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 'execute-api:Invoke'
+            Resource: '*'
+
+  # API Gateway Resources
+  ApiGatewayRootResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref OrdersRestApi
+      ParentId: !GetAtt OrdersRestApi.RootResourceId
+      PathPart: 'orders'
+
+  # Resource for orders/{id} path
+  ApiGatewayOrderIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref OrdersRestApi
+      ParentId: !Ref ApiGatewayRootResource
+      PathPart: '{id}'
+
+  # API Gateway Methods
+  ApiGatewayProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OrdersRestApi
+      ResourceId: !Ref ApiGatewayRootResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FastApiFunctionIac.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Headers: true
+
+  # Method for orders/{id} path
+  ApiGatewayOrderIdMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OrdersRestApi
+      ResourceId: !Ref ApiGatewayOrderIdResource
+      HttpMethod: ANY
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes: []
+      RequestParameters:
+        method.request.header.Authorization: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FastApiFunctionIac.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Headers: true
+        - StatusCode: 401
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+        - StatusCode: 403
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Lambda Permission (CRITICAL - was missing!)
+  FastApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FastApiFunctionIac
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OrdersRestApi}/*/*/*'
+
+  # API Gateway Deployment (CRITICAL - was missing!)
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ApiGatewayProxyMethod
+      - ApiGatewayOrderIdMethod
+      - JwtAuthorizer
+      - JwtAuthorizerFunction
+      - JwtAuthorizerPermission
+    Properties:
+      RestApiId: !Ref OrdersRestApi
+      Description: !Sub "Deployment for ${Environment} environment"
+
+  # API Gateway Stage
+  ApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
+    Properties:
+      RestApiId: !Ref OrdersRestApi
+      DeploymentId: !Ref ApiGatewayDeployment
+      StageName: !Ref Environment
+      Description: !Sub "${Environment} stage"
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          LoggingLevel: !Ref LoggingLevel
+          DataTraceEnabled: true
+          MetricsEnabled: true
+
+  # CloudWatch Log Group for API Gateway Access Logs
+  ApiGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${Environment}-fastapi-gateway"
+      RetentionInDays: 14
+
+Outputs:
+  FastApiUrl:
+    Description: "FastAPI URL"
+    Value: !Sub "https://${OrdersRestApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/"
+    Export:
+      Name: !Sub "${AWS::StackName}-FastApiUrl"
+  
+  FunctionArn:
+    Description: "FastAPI Lambda Function ARN"
+    Value: !GetAtt FastApiFunctionIac.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-FunctionArn"
+
+  ApiGatewayId:
+    Description: "API Gateway REST API ID"
+    Value: !Ref OrdersRestApi
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiGatewayId"
+
+  ApiGatewayRootResourceId:
+    Description: "API Gateway Root Resource ID"
+    Value: !GetAtt OrdersRestApi.RootResourceId
+    Export:
+      Name: !Sub "${AWS::StackName}-RootResourceId"
