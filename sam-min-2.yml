@@ -30,6 +30,11 @@ Parameters:
     Type: String
     Description: JWT Algorithm
     Default: "HS256"
+  
+  Description:
+    Type: String
+    Description: Description of the API Gateway
+    Default: "FastAPI Gateway for ${Environment} environment"
 
 Resources:
   # IAM Role for API Gateway CloudWatch logging
@@ -136,6 +141,21 @@ Resources:
             Resource: '*'
 
   # API Gateway Resources
+  ApiGatewayMockResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref OrdersRestApi
+      ParentId: !GetAtt OrdersRestApi.RootResourceId
+      PathPart: 'mock'
+
+  ApiGatewayHealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref OrdersRestApi
+      ParentId: !GetAtt OrdersRestApi.RootResourceId
+      PathPart: 'health'
+
+  # API Gateway Resources
   ApiGatewayRootResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -151,13 +171,13 @@ Resources:
       ParentId: !Ref ApiGatewayRootResource
       PathPart: '{id}'
 
-  # API Gateway Methods
-  ApiGatewayProxyMethod:
+  # API Gateway Health Method
+  ApiGatewayHealthMethod:
     Type: AWS::ApiGateway::Method
     Properties:
       RestApiId: !Ref OrdersRestApi
-      ResourceId: !Ref ApiGatewayRootResource
-      HttpMethod: ANY
+      ResourceId: !Ref ApiGatewayHealthResource
+      HttpMethod: GET
       AuthorizationType: NONE
       Integration:
         Type: AWS_PROXY
@@ -169,6 +189,65 @@ Resources:
             method.response.header.Access-Control-Allow-Origin: true
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Headers: true
+        - StatusCode: 403
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ApiGatewayMockMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OrdersRestApi
+      ResourceId: !Ref ApiGatewayMockResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+
+      Integration:
+        Type: MOCK
+        PassthroughBehavior: NEVER
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'DELETE,GET,HEAD,OPTIONS,PUT,POST,PATCH'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            ResponseTemplates:
+              application/json: Empty
+                
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Headers: true
+          ResponseModels:
+            application/json: Empty
+
+  # API Gateway Methods
+  ApiGatewayProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref OrdersRestApi
+      ResourceId: !Ref ApiGatewayRootResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      RequestParameters:
+        method.request.header.x-api-key: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FastApiFunctionIac.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Headers: true
+        - StatusCode: 403
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
 
   # Method for orders/{id} path
   ApiGatewayOrderIdMethod:
@@ -212,6 +291,7 @@ Resources:
   ApiGatewayDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
+      - ApiGatewayHealthMethod
       - ApiGatewayProxyMethod
       - ApiGatewayOrderIdMethod
       - JwtAuthorizer
@@ -219,7 +299,7 @@ Resources:
       - JwtAuthorizerPermission
     Properties:
       RestApiId: !Ref OrdersRestApi
-      Description: !Sub "Deployment for ${Environment} environment"
+      Description: !Ref Description
 
   # API Gateway Stage
   ApiGatewayStage:
@@ -236,6 +316,43 @@ Resources:
           LoggingLevel: !Ref LoggingLevel
           DataTraceEnabled: true
           MetricsEnabled: true
+        - ResourcePath: "/health"
+          HttpMethod: "GET"
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+  
+  # API Gateway Usage Plan
+  ApiGatewayUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub "${Environment}-usage-plan"
+      Description: !Sub "${Environment} usage plan"
+      ApiStages:
+        - ApiId: !Ref OrdersRestApi
+          Stage: !Ref Environment
+      Throttle:
+        BurstLimit: 10
+        RateLimit: 10
+      Quota:
+        Limit: 1000
+        Period: MONTH
+  
+  # API Gateway API Key
+  ApiGatewayApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: "poshub-dev-key"
+      Description: !Sub "API Key for ${Environment} environment"
+      Enabled: true
+
+  # API Gateway Usage Plan Key
+  ApiGatewayUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiGatewayApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref ApiGatewayUsagePlan
+  
 
   # CloudWatch Log Group for API Gateway Access Logs
   ApiGatewayLogGroup:
@@ -268,3 +385,9 @@ Outputs:
     Value: !GetAtt OrdersRestApi.RootResourceId
     Export:
       Name: !Sub "${AWS::StackName}-RootResourceId"
+
+  ApiGatewayApiKey:
+    Description: "API Gateway API Key"
+    Value: !Ref ApiGatewayApiKey
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiKey"
