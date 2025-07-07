@@ -1,4 +1,3 @@
-# (To be cleaned)
 ## Building Lambda layer
 ### Export requirement.txt
 1. Add poetry export plugin ([for more details](https://github.com/python-poetry/poetry-plugin-export)).
