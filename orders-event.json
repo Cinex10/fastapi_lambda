@@ -1,0 +1,22 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /orders",
+  "rawPath": "/orders",
+  "rawQueryString": "",
+  "headers": {
+    "host": "localhost",
+    "x-forwarded-proto": "http",
+    "content-type": "application/json",
+    "content-length": "98",
+    "Authorization" : "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzY29wZXMiOiJvcmRlcnM6d3JpdGUifQ.LeZdAJBKMVKJTJ9YR5hBgo-nWLCe4FvWmNQWLpWu308"
+  },
+  "requestContext": {
+    "http": {
+      "method": "POST",
+      "path": "/orders",
+      "sourceIp": "127.0.0.1"
+    }
+  },
+  "body": "{\"orderId\": \"1\", \"createdAt\": \"1750933963\", \"totalAmount\": 320.00, \"currency\": \"USD\"}",
+  "isBase64Encoded": false
+}

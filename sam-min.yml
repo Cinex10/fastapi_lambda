@@ -14,8 +14,43 @@ Parameters:
     Default: dev
     AllowedValues: [dev, staging, prod]
     Description: Environment name
+  
+  JwtSecret:
+    Type: String
+    Default: 'jwt-secret'
+    Description: JWT secret
+  
+  JwtAlgorithm:
+    Type: String
+    Default: 'HS256'
+    Description: JWT algorithm
 
 Resources:
+  # Dead Letter Queue for failed orders
+  PoshubOrdersDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: "poshub-orders-dlq"
+
+  # Main Orders Queue with DLQ configuration
+  PoshubOrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: "poshub-orders-dev"
+      VisibilityTimeout: 30 
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PoshubOrdersDlq.Arn
+        maxReceiveCount: 3
+
+  # SSM Parameter to store the queue URL
+  QueueUrlParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: QUEUE_URL
+      Type: String
+      Value: !Ref PoshubOrdersQueue
+      Description: URL of the main orders queue
+
   # Layer depuis votre fichier ZIP
   PythonDependenciesLayer:
     Type: AWS::Serverless::LayerVersion
@@ -40,7 +75,27 @@ Resources:
         Variables:
           ENVIRONMENT: !Ref Environment
           LOG_LEVEL: INFO
-      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/poshub-lambda-role'
+          JWT_SECRET: !Ref JwtSecret
+          JWT_ALGORITHM: !Ref JwtAlgorithm
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: '*'
+        - Statement:
+          - Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt PoshubOrdersQueue.Arn
+        - Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: '*'
+
       Events:
         # Capturer toutes les routes
         ApiRoot:
@@ -55,12 +110,12 @@ Resources:
             Path: /{proxy+}
             Method: ANY
             RestApiId: !Ref FastApiGateway
-  
-  PushEnvToLogsIac:
+
+  OrderProcessorFunctionIac:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/
-      Handler: utils.push_env_to_logs.handler
+      Handler: order_processor.lambda_handler
       Runtime: python3.13
       Layers:
         - !Ref PythonDependenciesLayer
@@ -68,15 +123,25 @@ Resources:
         Variables:
           ENVIRONMENT: !Ref Environment
           LOG_LEVEL: INFO
-      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/poshub-lambda-role'
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt PoshubOrdersQueue.QueueName
+        - Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: '*'
       Events:
-        # Capturer toutes les routes
-        ApiRoot:
-          Type: Api
+        OrdersQueue:
+          Type: SQS
           Properties:
-            Path: /push-env-to-logs
-            Method: ANY
-            RestApiId: !Ref FastApiGateway
+            BatchSize: 10
+            Enabled: true
+            Queue: !GetAtt PoshubOrdersQueue.Arn
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
 
   # API Gateway
   FastApiGateway:
@@ -100,3 +165,15 @@ Outputs:
     Value: !GetAtt FastApiFunctionIac.Arn
     Export:
       Name: !Sub "${AWS::StackName}-FunctionArn"
+
+  OrdersQueueUrl:
+    Description: "Orders Queue URL"
+    Value: !Ref PoshubOrdersQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-OrdersQueueUrl"
+
+  OrdersDlqUrl:
+    Description: "Orders Dead Letter Queue URL"
+    Value: !Ref PoshubOrdersDlq
+    Export:
+      Name: !Sub "${AWS::StackName}-OrdersDlqUrl"

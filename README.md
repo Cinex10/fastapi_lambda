@@ -1,185 +1,100 @@
-# (To be cleaned)
-## Building Lambda layer
-### Export requirement.txt
-1. Add poetry export plugin ([for more details](https://github.com/python-poetry/poetry-plugin-export)).
-```bash
-poetry self add poetry-plugin-export
-```
-2. Export packages in requirement.txt
-```bash
-poetry export -f requirements.txt --output requirements.txt --without-hashes
-# --without-hashes will add platform specific hashes to packages
-```
+The `sam-min.yaml` template, define all required ressource :
+- SQS Queues
+- Lambda functions
+- IAM Policies
 
-### Create the layer
-1. install plugins locally
-```bash
-mkdir -p layers/python-deps/python # create layer folder
-```
-
-2. Download packages
-```bash
-pip install -r requirements.txt -t layers/python-deps/python --platform manylinux2014_x86_64 --only-binary=:all: --no-deps
-```
-**Args explanation**
-> *`--platform manylinux2014_x86_64`* = Downloads packages compiled for a Linux x86_64 architecture which is used by AWS Lambda
-> *`--only-binary=:all:`* =  Forces pip to only use pre-compiled binary wheels (Compiled, Ready to install), never source distributions (Suitable for devlopement )
-> *`--no-deps`* = Skips automatic dependency resolution and installation since Poetry already resolved all dependencies ( Prevents pip from potentially installing different versions)
-
-3. create .zip file
-```bash
-cd layers/python-deps/python
-zip -r ../../python-deps-layer.zip .                                 
-```
-
-## Deplying Lambda layer
-
-At this point, every thing is ready to create our serverless function, actually, we can do that in 2 diffrent ways:
-
-### Manually (Using AWS Console)
-1. Create the layer : upload .zip, choose right paramters (arch, runtime)
-2. Create the function:
-    - choose "Author from scratch", Runtime, Role and upload the zip, change handler path, if we have made edits in the provisioned IDE, make sure you have tapped "Deploy" before test, we can create event test case by choosing right event template (API Gateway, S3...etc), then tap test.
-### Using IaC
-1. Write/Generate sam-min.yml file
-> I have added trust policy to *poshub-lambda-role* to trust lambda, so the our lambda function can assume it
+**Important**
 ```yaml
-AWSTemplateFormatVersion: '2010-09-09'
-Transform: AWS::Serverless-2016-10-31
-Description: FastAPI application with Mangum handler
-
-Globals:
-  Function:
-    Timeout: 30
-    MemorySize: 512
-    Runtime: python3.13
-
-Parameters:
-  Environment:
-    Type: String
-    Default: dev
-    AllowedValues: [dev, staging, prod]
-    Description: Environment name
-
-Resources:
-  PythonDependenciesLayer:
-    Type: AWS::Serverless::LayerVersion
-    Properties:
-      LayerName: !Sub "${Environment}-python-deps"
-      Description: Python dependencies including FastAPI and Mangum
-      ContentUri: layers/python-deps-layer.zip
-      CompatibleRuntimes:
-        - python3.13
-      RetentionPolicy: Retain
-
-  FastApiFunctionIac:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/
-      Handler: main.handler
-      Runtime: python3.13
-      Layers:
-        - !Ref PythonDependenciesLayer
-      Environment:
-        Variables:
-          ENVIRONMENT: !Ref Environment
-          LOG_LEVEL: INFO
-      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/poshub-lambda-role'
-      Events:
-        ApiRoot:
-          Type: Api
-          Properties:
-            Path: /
-            Method: ANY
-            RestApiId: !Ref FastApiGateway
-        ApiProxy:
-          Type: Api
-          Properties:
-            Path: /{proxy+}
-            Method: ANY
-            RestApiId: !Ref FastApiGateway
-  
-  PushEnvToLogsIac:
-    Type: AWS::Serverless::Function
-    Properties:
-      CodeUri: src/
-      Handler: utils.push_env_to_logs.handler
-      Runtime: python3.13
-      Layers:
-        - !Ref PythonDependenciesLayer
-      Environment:
-        Variables:
-          ENVIRONMENT: !Ref Environment
-          LOG_LEVEL: INFO
-      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/poshub-lambda-role'
-      Events:
-        ApiRoot:
-          Type: Api
-          Properties:
-            Path: /push-env-to-logs
-            Method: ANY
-            RestApiId: !Ref FastApiGateway
-  FastApiGateway:
-    Type: AWS::Serverless::Api
-    Properties:
-      StageName: !Ref Environment
-      Cors:
-        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS,PATCH'"
-        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-        AllowOrigin: "'*'"
-
-Outputs:
-  FastApiUrl:
-    Description: "FastAPI URL"
-    Value: !Sub "https://${FastApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/"
-    Export:
-      Name: !Sub "${AWS::StackName}-FastApiUrl"
-  
-  FunctionArn:
-    Description: "FastAPI Lambda Function ARN"
-    Value: !GetAtt FastApiFunctionIac.Arn
-    Export:
-      Name: !Sub "${AWS::StackName}-FunctionArn"
+Ressources:
+...
+  OrderProcessorFunctionIac:
+    ...
+    Events:
+      OrdersQueue:
+        Type: SQS
+        Properties:
+          BatchSize: 10
+          Enabled: true
+          Queue: !GetAtt PoshubOrdersQueue.Arn
+          FunctionResponseTypes:
+            - ReportBatchItemFailures # To properly handle failed orders (amount == -1)
 ```
- You can test this template locally (using Docker), with this command
+
+When `OrderProcessorFunctionIac` fail to process an order, it return its ID, so it won't be removed from the `poshub-orders-dev` queue, the same process is repeated `maxReceiveCount: 3` times, so it will be sent to the dead queue `poshub-orders-dlq`.
+
+## Testing
+
+
+Before deplying it, we can test it locally to create a new order (without any edge case)
+
 ```bash
-# A simulation of an API Gateway event 
-echo '{
-  "version": "2.0",
-  "routeKey": "GET /demo/external-demo",
-  "rawPath": "/demo/external-demo",
-  "rawQueryString": "",
-  "headers": {
-    "host": "localhost",
-    "x-forwarded-proto": "http"
-  },
-  "requestContext": {
-    "http": {
-      "method": "GET",
-      "path": "/demo/external-demo",
-      "sourceIp": "127.0.0.1"
-    }
-  },
-  "isBase64Encoded": false
-}' > event.json
+sam local invoke FastApiFunctionIac --container-host 127.0.0.1 -t sam-min.yml -e events/sqs-event-create_order.json
 
-sam local invoke FastApiFunctionIac --container-host 127.0.0.1 -t sam-min.yml -e event.json
+# Invoking order_processor.lambda_handler (python3.13)                                                                                                                                                    
+# Decompressing /Users/cinex/repo/upskilling/fastapi_lambda/layers/python-deps-layer.zip                                                                                                                  
+# PythonDependenciesLayer is a local Layer in the template                                                                                                                                                
+# Local image is up-to-date                                                                                                                                                                               
+# Building image.....................
+# Using local image: samcli/lambda-python:3.13-x86_64-38ee8e3770f1bc0baec63a773.                                                                                                                          
+                                                                                                                                                                                                        
+# Mounting /Users/cinex/repo/upskilling/fastapi_lambda/src as /var/task:ro,delegated, inside runtime container                                                                                            
+# START RequestId: 8380f28e-372d-47b2-ad58-716fa0753525 Version: $LATEST
+# [INFO]  2025-07-07T12:34:30.415Z                Found credentials in environment variables.
+# [INFO]  2025-07-07T12:34:30.568Z        05811c61-d0a9-4ac9-b9a0-d7813a4dc8ae    Received event with 1 records
+# [INFO]  2025-07-07T12:34:30.569Z        05811c61-d0a9-4ac9-b9a0-d7813a4dc8ae    Processing message 059f36b4-87a3-44ab-83d2-661975830a7d: {'date': '2025-06-26 10:32:43', 'source': 'aws cli', 'order': {'orderId': '2', 'createdAt': '1750933963', 'totalAmount': 380, 'currency': 'USD'}}
+# [INFO]  2025-07-07T12:34:30.569Z        05811c61-d0a9-4ac9-b9a0-d7813a4dc8ae    Processing message from aws cli at None
+# [INFO]  2025-07-07T12:34:30.861Z        05811c61-d0a9-4ac9-b9a0-d7813a4dc8ae    Successfully processed message 059f36b4-87a3-44ab-83d2-661975830a7d
+# END RequestId: 05811c61-d0a9-4ac9-b9a0-d7813a4dc8ae
+# REPORT RequestId: 05811c61-d0a9-4ac9-b9a0-d7813a4dc8ae  Init Duration: 1.01 ms  Duration: 1390.45 ms    Billed Duration: 1391 ms        Memory Size: 512 MB     Max Memory Used: 512 MB
+# {"statusCode": 200, "body": "{\"message\": \"Successfully processed 1 messages\"}"}
 ```
 
+we can verify that everything is working well using `orders_queue` log stream in `/aws/lambda/poshub-dev` log group.
+
+![Testing](assets/1.png)
+
+If we try to pass negative amount, using `events/sqs-event-negative-amount.json` event, we get something like this :
+
+```bash
+sam local invoke OrderProcessorFunctionIac  --container-host 127.0.0.1 -t sam-min.yml -e events/sqs-event-negative-amount.json
+
+# Mounting /Users/cinex/repo/upskilling/fastapi_lambda/src as /var/task:ro,delegated, inside runtime container                                                                                           
+# START RequestId: 00198e86-781b-4d97-88d3-55da80671e70 Version: $LATEST
+# [INFO]  2025-07-07T12:38:42.224Z                Found credentials in environment variables.
+# [INFO]  2025-07-07T12:38:42.349Z        348f594b-e4c8-4c59-a568-12e2882d938c    Received event with 1 records
+# [INFO]  2025-07-07T12:38:42.350Z        348f594b-e4c8-4c59-a568-12e2882d938c    Processing message 059f36b4-87a3-44ab-83d2-661975830a7d: {'date': '2025-06-26 10:32:43', 'source': 'aws cli', 'order': {'orderId': '2', 'createdAt': '1750933963', 'totalAmount': -1, 'currency': 'USD'}}
+# [ERROR] 2025-07-07T12:38:42.350Z        348f594b-e4c8-4c59-a568-12e2882d938c    Error in process_message: Fail to process order 2 from message #059f36b4-87a3-44ab-83d2-661975830a7d beacause must be totalAmount != -1
+# [ERROR] 2025-07-07T12:38:42.643Z        348f594b-e4c8-4c59-a568-12e2882d938c    Error processing message 059f36b4-87a3-44ab-83d2-661975830a7d: Fail to process order
+# END RequestId: 348f594b-e4c8-4c59-a568-12e2882d938c
+# REPORT RequestId: 348f594b-e4c8-4c59-a568-12e2882d938c  Init Duration: 0.34 ms  Duration: 1200.53 ms    Billed Duration: 1201 ms        Memory Size: 512 MB     Max Memory Used: 512 MB
+# {"batchItemFailures": [{"itemIdentifier": "059f36b4-87a3-44ab-83d2-661975830a7d"}]}
+```
 
 
 2. Deploy the template
 ```bash
-sam deploy --template-file sam-min.yml --stack-name poshub-app-iac --s3-bucket poshub-dev-bucket
+sam deploy --template-file sam-min.yml --stack-name poshub-app-sqs --s3-bucket poshub-dev-bucket  --capabilities CAPABILITY_IAM --parameter-overrides ParameterKey=JwtSecret,ParameterValue=a-string-secret-at-least-256-bits-long
 ```
 
-3. Testing
+3. Testing (With amount == -1)
+
+Since, FastAPI apply `ge = 0` condition on the `amount` field, we can bypass it and directly insert a order in the `poshub-orders-dev` queue with `amount == -1`
+
 ```bash
-aws lambda invoke \
-  --function-name poshub-app-iac-FastApiFunctionIac-stUZnmzHspwg \
-  --payload "$(base64 -i events/api-gateway-event.json)" \
-  response.json
+aws sqs send-message \
+  --queue-url https://sqs.eu-north-1.amazonaws.com/471448382724/poshub-orders-dev \
+  --message-body '{ "date": "2025-11-11 02:32:43", "source": "aws cli", "order": { "orderId": "7", "createdAt": "1750933963", "totalAmount": -1, "currency": "USD" } }'
 
-cat response.json 
-# {"statusCode": 200, "body": "[{\"id\":\"prod_elec_tv_sony_bravia_xr_a90j\",\"sku\":\"XR65A90J\",\"name\":\"Sony BRAVIA XR A90J 65\\\" OLED 4K HDR Smart TV\",\"status\":\"active\"},{\"id\":\"prod_app_shirt_cotton_crew\",\"sku\":\"TSHIRT-CREW-BL-M\",\"name\":\"Men's Cotton Crew Neck T-Shirt\",\"status\":\"active\"}]", "headers": {"content-length": "252", "content-type": "application/json", "x-correlation-id": "2d9cdf7e-5080-4e38-94be-4ae87b8905fc"}, "isBase64Encoded": false}
+# {
+#     "MD5OfMessageBody": "c82ea93a078f53e9fb1c435944f5e6f2",
+#     "MessageId": "cf7d09b2-4bcc-4046-8c3e-e9b5437fa16a"
+# }
 ```
+
+This will trigger the `OrderProcessorFunctionIac` lambda function to process the created order, which will fail for 3 times as shown in the figure below :
+
+![Testing](assets/2.png)
+
+After failing 3 times to process the message, it will be redirected to the dead queue as shown in the figure below :
+
+![Testing](assets/3.png)
